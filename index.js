@@ -3,15 +3,13 @@ const fs = require('fs');
 const path = require('path');
 const { Resend } = require('resend');
 
-const key = process.env.RESEND_KEY;
-const resend = new Resend(key);
-
+const resend = new Resend(process.env.RESEND_KEY);
 
 // ---------- SMART TIME CHECK ---------
 function shouldSendNow() {
   const now = new Date();
 
-  // Convert UTC → Bangladesh (UTC+6)
+  // UTC → Bangladesh (UTC+6)
   const bdHour = (now.getUTCHours() + 6) % 24;
   const minute = now.getUTCMinutes();
 
@@ -19,34 +17,43 @@ function shouldSendNow() {
 }
 
 // ---------- DUPLICATE PREVENTION ----------
+const logFile = path.join(__dirname, "lastRun.txt");
+
 function alreadySentToday() {
-  const file = path.join(__dirname, "lastRun.txt");
   const today = new Date().toDateString();
 
-  if (fs.existsSync(file)) {
-    const last = fs.readFileSync(file, "utf-8");
-    if (last === today) return true;
+  if (fs.existsSync(logFile)) {
+    return fs.readFileSync(logFile, "utf-8") === today;
   }
-
   return false;
 }
 
 function markSent() {
-  const file = path.join(__dirname, "lastRun.txt");
-  const today = new Date().toDateString();
-  fs.writeFileSync(file, today);
+  fs.writeFileSync(logFile, new Date().toDateString());
 }
 
-// ---------- LOAD JSON ----------
-let bangla = JSON.parse(fs.readFileSync("json/bangla.json", "utf-8"));
-let phy    = JSON.parse(fs.readFileSync("json/phy.json", "utf-8"));
-let chem   = JSON.parse(fs.readFileSync("json/chem.json", "utf-8"));
+// ---------- SAFE JSON LOADER ----------
+function loadJSON(file) {
+  try {
+    return JSON.parse(
+      fs.readFileSync(path.join(__dirname, file), "utf-8")
+    );
+  } catch (err) {
+    console.error(`❌ Failed to load ${file}`, err.message);
+    return [];
+  }
+}
+
+const bangla = loadJSON("json/bangla.json");
+const phy    = loadJSON("json/phy.json");
+const chem   = loadJSON("json/chem.json");
 
 function getRandom(arr) {
+  if (!arr.length) return "No data";
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-let tips = [getRandom(bangla), getRandom(chem), getRandom(phy)];
+const tips = [getRandom(bangla), getRandom(chem), getRandom(phy)];
 
 // ---------- NOTATION PARSER ----------
 function parseNotation(str) {
@@ -58,17 +65,17 @@ function parseNotation(str) {
   str = str.replace(/<=>/g, '⇌');
 
   str = str.replace(/=([^=]+)=([^=]+)=>([^=]*)/g, (_, above, below, rest) => {
-    return `<span style="display:inline-block; text-align:center; line-height:1.2;">
-      <span style="font-size:0.8em; display:block;">${above}</span>
-      <span style="font-size:1.2em;">→</span>
-      <span style="font-size:0.8em; display:block;">${below}</span>
+    return `<span style="display:inline-block;text-align:center;">
+      <span style="font-size:0.8em;display:block;">${above}</span>
+      <span>→</span>
+      <span style="font-size:0.8em;display:block;">${below}</span>
     </span>${rest.slice(1)}`;
   });
 
   str = str.replace(/=([^=]+)=>([^=]*)/g, (_, above, rest) => {
-    return `<span style="display:inline-block; text-align:center;">
-      <span style="font-size:0.8em; display:block;">${above}</span>
-      <span style="font-size:1.2em;">→</span>
+    return `<span style="display:inline-block;text-align:center;">
+      <span style="font-size:0.8em;display:block;">${above}</span>
+      <span>→</span>
     </span>${rest.slice(1)}`;
   });
 
@@ -80,14 +87,14 @@ function parseNotation(str) {
 // ---------- EMAIL RENDER ----------
 function renderEmail(data) {
   const subjectColors = [
-    { accent: '#2563eb', label: 'বাংলা',    icon: '✦' },
+    { accent: '#2563eb', label: 'বাংলা', icon: '✦' },
     { accent: '#0d9488', label: 'Chemistry', icon: '⬡' },
-    { accent: '#7c3aed', label: 'Physics',   icon: '◎' }
+    { accent: '#7c3aed', label: 'Physics', icon: '◎' }
   ];
 
   function renderValue(value) {
     if (Array.isArray(value)) {
-      return value.map(item => `<div style="margin-left:10px;">${renderValue(item)}</div>`).join('');
+      return value.map(v => `<div style="margin-left:10px;">${renderValue(v)}</div>`).join('');
     }
 
     if (typeof value === 'object' && value !== null) {
@@ -96,8 +103,7 @@ function renderEmail(data) {
       ).join('');
     }
 
-    const str = String(value);
-    const parsed = parseNotation(str);
+    const parsed = parseNotation(String(value));
 
     return parsed.replace(
       /(\b\d[\d.,/^×·\s]*[a-zA-Zα-ωΑ-Ω²³⁻⁰¹²³⁴⁵⁶⁷⁸⁹]*\b)/g,
@@ -110,7 +116,9 @@ function renderEmail(data) {
 
     return `
       <div style="border:1px solid #e5e7eb;border-top:3px solid ${theme.accent};padding:12px;margin-bottom:10px;">
-        <div style="color:${theme.accent};font-size:12px;">${theme.icon} ${theme.label}</div>
+        <div style="color:${theme.accent};font-size:12px;">
+          ${theme.icon} ${theme.label}
+        </div>
         <div>${renderValue(item)}</div>
       </div>
     `;
@@ -125,13 +133,13 @@ function renderEmail(data) {
   `;
 }
 
-let body = renderEmail(tips);
+const body = renderEmail(tips);
 
 // ---------- RETRY SYSTEM ----------
 async function sendEmailWithRetry(retries = 3, delay = 5000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      console.log(`Attempt ${attempt}...`);
+      console.log(`📤 Attempt ${attempt}...`);
 
       const { data, error } = await resend.emails.send({
         from: 'Reminder <reminder@email.kirtasehidayah.app>',
@@ -163,7 +171,7 @@ async function sendEmailWithRetry(retries = 3, delay = 5000) {
   console.log("⏰ Checking schedule...");
 
   if (!shouldSendNow()) {
-    console.log("❌ Not the right time");
+    console.log("❌ Not 6:30 PM window");
     return;
   }
 
